@@ -5,8 +5,16 @@ import com.mojang.blaze3d.systems.RenderSystem;
 import net.fabricmc.fabric.api.client.rendering.v1.HudRenderCallback;
 import net.minecraft.client.MinecraftClient;
 import net.minecraft.client.gui.DrawContext;
+import net.minecraft.client.render.BufferBuilder;
+import net.minecraft.client.render.BufferRenderer;
+import net.minecraft.client.render.GameRenderer;
+import net.minecraft.client.render.Tessellator;
+import net.minecraft.client.render.VertexFormat;
+import net.minecraft.client.render.VertexFormats;
 import net.minecraft.client.util.Window;
+import net.minecraft.client.util.math.MatrixStack;
 import net.minecraft.util.math.ColorHelper;
+import org.joml.Matrix4f;
 
 public final class MinimapRenderer {
     private static boolean enabled = true;
@@ -61,30 +69,44 @@ public final class MinimapRenderer {
                 (int) (centerY + half),
                 bg);
 
-        // Blend for semi-transparent cells
+        // Setup rendering for custom geometry
         RenderSystem.enableBlend();
         RenderSystem.defaultBlendFunc();
+        RenderSystem.disableCull();
+        RenderSystem.setShader(GameRenderer::getPositionColorProgram);
 
-        float tileScale = Math.max(3.0f, (viewSize / (float) (r * 2 + 4)));
+        MatrixStack matrices = dc.getMatrices();
+        matrices.push();
+        Matrix4f matrix = matrices.peek().getPositionMatrix();
+
+        // Use 1.21.1 BufferBuilder approach
+        BufferBuilder buf = Tessellator.getInstance().begin(VertexFormat.DrawMode.QUADS, VertexFormats.POSITION_COLOR);
+
+        float tileScale = Math.max(4.0f, (viewSize / (float) (r * 2 + 4)));
         float halfW = tileScale * 0.5f;   // diamond half width
         float halfH = tileScale * 0.25f;  // diamond half height
 
-        // Draw center-first by rings (calls dc.fill-based drawCell)
+        // Draw center-first by rings for proper isometric diamonds
         for (int ring = 0; ring <= r; ring++) {
             for (int dx = -ring; dx <= ring; dx++) {
                 int dzTop = ring - Math.abs(dx);
-                drawCell(dc, colors, r, dx, dzTop, centerX, centerY, size, halfW, halfH);
+                drawIsometricDiamond(buf, matrix, colors, r, dx, dzTop, centerX, centerY, size, halfW, halfH);
                 if (dzTop != 0) {
-                    drawCell(dc, colors, r, dx, -dzTop, centerX, centerY, size, halfW, halfH);
+                    drawIsometricDiamond(buf, matrix, colors, r, dx, -dzTop, centerX, centerY, size, halfW, halfH);
                 }
             }
         }
 
+        // Submit geometry
+        BufferRenderer.drawWithGlobalProgram(buf.end());
+
+        matrices.pop();
         RenderSystem.disableBlend();
     }
 
-    private static void drawCell(
-            DrawContext dc,
+    private static void drawIsometricDiamond(
+            BufferBuilder buf,
+            Matrix4f matrix,
             int[] colors,
             int radius,
             int gx,
@@ -104,18 +126,15 @@ public final class MinimapRenderer {
         int r = (rgba >>> 16) & 0xFF;
         int g = (rgba >>> 8) & 0xFF;
         int b = rgba & 0xFF;
-        int color = (a << 24) | (r << 16) | (g << 8) | b;
 
-        // Isometric placement (2:1)
+        // True isometric 2:1 projection
         float sx = centerX + (gx - gz) * halfW;
         float sy = centerY + (gx + gz) * halfH;
 
-        // Diamond approximated with 4 axis-aligned quads (fast, no raw vertices)
-        // Top half (two quads)
-        dc.fill((int) (sx - halfW), (int) (sy - halfH), (int) sx, (int) sy, color);
-        dc.fill((int) sx, (int) (sy - halfH), (int) (sx + halfW), (int) sy, color);
-        // Bottom half (two quads)
-        dc.fill((int) (sx - halfW), (int) sy, (int) sx, (int) (sy + halfH), color);
-        dc.fill((int) sx, (int) sy, (int) (sx + halfW), (int) (sy + halfH), color);
+        // Perfect diamond quad (top, right, bottom, left vertices)
+        buf.vertex(matrix, sx, sy - halfH, 0).color(r, g, b, a);        // top
+        buf.vertex(matrix, sx + halfW, sy, 0).color(r, g, b, a);        // right
+        buf.vertex(matrix, sx, sy + halfH, 0).color(r, g, b, a);        // bottom
+        buf.vertex(matrix, sx - halfW, sy, 0).color(r, g, b, a);        // left
     }
 }

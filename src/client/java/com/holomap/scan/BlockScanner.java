@@ -11,11 +11,6 @@ import net.minecraft.util.math.MathHelper;
 import net.minecraft.world.World;
 import net.minecraft.world.chunk.Chunk;
 
-/**
- * Client-side scanner for blocks around the player.
- *
- * Scans a square radius and height band to collect topmost solid blocks suitable for a minimap.
- */
 public final class BlockScanner {
     private BlockScanner() {}
 
@@ -30,28 +25,35 @@ public final class BlockScanner {
         CompletableFuture.runAsync(
                 () -> {
                     try {
-                        var data = sampleTopBlocks(world, origin, hr, vr);
+                        var data = sampleTopBlocksWithHeight(world, origin, hr, vr);
                         MinecraftClient.getInstance()
-                                .execute(() -> MinimapData.get().setScanResult(origin, hr, data));
+                                .execute(() -> MinimapData.get().setScanResultWithHeight(origin, hr, data.colors, data.heights));
                     } catch (Exception e) {
                         HoloMapMod.LOGGER.error("Scan failed", e);
                     }
                 });
     }
 
-    /**
-     * Returns a dense array of block colors or ids per (x,z) offset. We do top-surface pick: find
-     * first non-air/non-fluid from top-down within the vertical range centered on player Y.
-     */
-    private static int[] sampleTopBlocks(World world, BlockPos origin, int hr, int vr) {
+    public static class ScanResult {
+        public final int[] colors;
+        public final int[] heights;
+
+        public ScanResult(int[] colors, int[] heights) {
+            this.colors = colors;
+            this.heights = heights;
+        }
+    }
+
+    private static ScanResult sampleTopBlocksWithHeight(World world, BlockPos origin, int hr, int vr) {
         int size = (2 * hr + 1);
         int[] colors = new int[size * size];
+        int[] heights = new int[size * size];
 
         int yCenter = origin.getY();
         int yTop = Math.min(world.getTopY(), yCenter + vr / 2);
         int yBottom = Math.max(world.getBottomY(), yCenter - vr / 2);
 
-        // Pre-warm chunk cache by accessing chunk references for the area
+        // Pre-warm chunk cache
         int chunkMinX = (origin.getX() - hr) >> 4;
         int chunkMaxX = (origin.getX() + hr) >> 4;
         int chunkMinZ = (origin.getZ() - hr) >> 4;
@@ -73,34 +75,46 @@ public final class BlockScanner {
                 int cz = absZ >> 4;
                 Chunk chunk = chunks[cx - chunkMinX][cz - chunkMinZ];
 
-                // sample top-down
                 int color = 0x00000000;
+                int height = yBottom;
+
+                // Sample top-down for surface
                 for (int y = yTop; y >= yBottom; y--) {
                     BlockState state = chunk.getBlockState(new BlockPos(absX, y, absZ));
                     if (!state.isAir() && state.getFluidState().isEmpty()) {
-                        color = approximateColor(state);
+                        color = approximateColorWithHeight(state, y - yCenter);
+                        height = y;
                         break;
                     }
                 }
 
                 int ix = (dz + hr) * size + (dx + hr);
                 colors[ix] = color;
+                heights[ix] = height;
             }
         }
 
-        return colors;
+        return new ScanResult(colors, heights);
     }
 
-    /**
-     * Very rough color by block. For better results, consider using the block color provider for the
-     * biome or a precomputed palette.
-     */
-    private static int approximateColor(BlockState state) {
+    private static int approximateColorWithHeight(BlockState state, int relativeHeight) {
         var id = Registries.BLOCK.getId(state.getBlock()).toString();
-        // Simple heuristics
+        int baseColor = getBaseBlockColor(id);
+
+        // Add height-based lighting (simple ambient occlusion approximation)
+        float heightFactor = MathHelper.clamp(relativeHeight / 32.0f + 0.5f, 0.3f, 1.0f);
+
+        int a = (baseColor >>> 24) & 0xFF;
+        int r = (int) (((baseColor >>> 16) & 0xFF) * heightFactor);
+        int g = (int) (((baseColor >>> 8) & 0xFF) * heightFactor);
+        int b = (int) ((baseColor & 0xFF) * heightFactor);
+
+        return (a << 24) | (r << 16) | (g << 8) | b;
+    }
+
+    private static int getBaseBlockColor(String id) {
         if (id.contains("grass") || id.contains("leaves")) return 0xFF3DAA48;
-        if (id.contains("stone") || id.contains("deepslate") || id.contains("andesite"))
-            return 0xFF7A7A7A;
+        if (id.contains("stone") || id.contains("deepslate") || id.contains("andesite")) return 0xFF7A7A7A;
         if (id.contains("sand")) return 0xFFE7DF9A;
         if (id.contains("water")) return 0xFF2F66B3;
         if (id.contains("snow")) return 0xFFFFFFFF;

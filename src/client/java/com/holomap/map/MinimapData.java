@@ -8,6 +8,7 @@ public final class MinimapData {
     private BlockPos origin = BlockPos.ORIGIN;
     private int radius = 32;
     private int[] colors = new int[0];
+    private int[] heights = new int[0];
     private boolean ready = false;
 
     private MinimapData() {}
@@ -20,6 +21,15 @@ public final class MinimapData {
         this.origin = origin.toImmutable();
         this.radius = radius;
         this.colors = colors;
+        this.heights = new int[colors.length]; // Initialize heights to zero
+        this.ready = true;
+    }
+
+    public synchronized void setScanResultWithHeight(BlockPos origin, int radius, int[] colors, int[] heights) {
+        this.origin = origin.toImmutable();
+        this.radius = radius;
+        this.colors = colors;
+        this.heights = heights;
         this.ready = true;
     }
 
@@ -39,8 +49,13 @@ public final class MinimapData {
         return colors;
     }
 
+    public synchronized int[] heights() {
+        return heights;
+    }
+
     public synchronized void reset() {
         ready = false;
         colors = new int[0];
+        heights = new int[0];
     }
 }
