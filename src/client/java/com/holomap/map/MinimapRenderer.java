@@ -5,12 +5,8 @@ import com.mojang.blaze3d.systems.RenderSystem;
 import net.fabricmc.fabric.api.client.rendering.v1.HudRenderCallback;
 import net.minecraft.client.MinecraftClient;
 import net.minecraft.client.gui.DrawContext;
-import net.minecraft.client.render.RenderLayer;
-import net.minecraft.client.render.VertexConsumer;
 import net.minecraft.client.util.Window;
-import net.minecraft.client.util.math.MatrixStack;
 import net.minecraft.util.math.ColorHelper;
-import org.joml.Matrix4f;
 
 public final class MinimapRenderer {
     private static boolean enabled = true;
@@ -55,7 +51,7 @@ public final class MinimapRenderer {
         int[] colors = data.colors();
         if (colors.length != size * size) return;
 
-        // Draw backdrop using DrawContext
+        // Backdrop
         int bg = ColorHelper.Argb.getArgb(96, 0, 0, 0);
         float half = viewSize * 0.5f;
         dc.fill(
@@ -65,40 +61,30 @@ public final class MinimapRenderer {
                 (int) (centerY + half),
                 bg);
 
-        // Setup rendering state
+        // Blend for semi-transparent cells
         RenderSystem.enableBlend();
         RenderSystem.defaultBlendFunc();
-        RenderSystem.disableCull();
-
-        MatrixStack matrices = dc.getMatrices();
-        matrices.push();
-
-        // Use DrawContext's vertex consumers for custom geometry
-        VertexConsumer vertexConsumer = dc.getVertexConsumers().getBuffer(RenderLayer.getGui());
-        Matrix4f matrix = matrices.peek().getPositionMatrix();
 
         float tileScale = Math.max(3.0f, (viewSize / (float) (r * 2 + 4)));
         float halfW = tileScale * 0.5f;   // diamond half width
         float halfH = tileScale * 0.25f;  // diamond half height
 
-        // Draw center-first by rings
+        // Draw center-first by rings (calls dc.fill-based drawCell)
         for (int ring = 0; ring <= r; ring++) {
             for (int dx = -ring; dx <= ring; dx++) {
                 int dzTop = ring - Math.abs(dx);
-                drawCell(vertexConsumer, matrix, colors, r, dx, dzTop, centerX, centerY, size, halfW, halfH);
+                drawCell(dc, colors, r, dx, dzTop, centerX, centerY, size, halfW, halfH);
                 if (dzTop != 0) {
-                    drawCell(vertexConsumer, matrix, colors, r, dx, -dzTop, centerX, centerY, size, halfW, halfH);
+                    drawCell(dc, colors, r, dx, -dzTop, centerX, centerY, size, halfW, halfH);
                 }
             }
         }
 
-        matrices.pop();
         RenderSystem.disableBlend();
     }
 
     private static void drawCell(
-            VertexConsumer vc,
-            Matrix4f matrix,
+            DrawContext dc,
             int[] colors,
             int radius,
             int gx,
@@ -110,6 +96,7 @@ public final class MinimapRenderer {
             float halfH) {
         int ix = (gz + radius) * size + (gx + radius);
         if (ix < 0 || ix >= colors.length) return;
+
         int rgba = colors[ix];
         int a = (rgba >>> 24) & 0xFF;
         if (a == 0) return;
@@ -117,15 +104,18 @@ public final class MinimapRenderer {
         int r = (rgba >>> 16) & 0xFF;
         int g = (rgba >>> 8) & 0xFF;
         int b = rgba & 0xFF;
+        int color = (a << 24) | (r << 16) | (g << 8) | b;
 
-        // 2:1 isometric placement
-        float sx = centerX + (gx - gz) * (halfW);
-        float sy = centerY + (gx + gz) * (halfH);
+        // Isometric placement (2:1)
+        float sx = centerX + (gx - gz) * halfW;
+        float sy = centerY + (gx + gz) * halfH;
 
-        // Diamond as a quad (top, right, bottom, left)
-        vc.vertex(matrix, sx, sy - halfH, 0).color(r, g, b, a).next();
-        vc.vertex(matrix, sx + halfW, sy, 0).color(r, g, b, a).next();
-        vc.vertex(matrix, sx, sy + halfH, 0).color(r, g, b, a).next();
-        vc.vertex(matrix, sx - halfW, sy, 0).color(r, g, b, a).next();
+        // Diamond approximated with 4 axis-aligned quads (fast, no raw vertices)
+        // Top half (two quads)
+        dc.fill((int) (sx - halfW), (int) (sy - halfH), (int) sx, (int) sy, color);
+        dc.fill((int) sx, (int) (sy - halfH), (int) (sx + halfW), (int) sy, color);
+        // Bottom half (two quads)
+        dc.fill((int) (sx - halfW), (int) sy, (int) sx, (int) (sy + halfH), color);
+        dc.fill((int) sx, (int) sy, (int) (sx + halfW), (int) (sy + halfH), color);
     }
 }
