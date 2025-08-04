@@ -80,6 +80,9 @@ public final class BlockMeshBuilder3D {
         BlockState state = blockData.state;
         boolean[] visibleFaces = blockData.visibleFaces;
 
+        // Skip fully transparent blocks
+        if (state.isAir()) return;
+
         BakedModel model = client.getBlockRenderManager().getModel(state);
 
         // Get texture for each face

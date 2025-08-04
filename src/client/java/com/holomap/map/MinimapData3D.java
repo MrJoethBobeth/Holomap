@@ -1,5 +1,7 @@
 package com.holomap.map;
 
+import com.holomap.render.MinimapCamera3D;
+import com.holomap.render.MinimapRenderer3D;
 import com.holomap.scan.BlockScanner3D;
 import net.minecraft.util.math.BlockPos;
 
@@ -27,6 +29,10 @@ public final class MinimapData3D {
         this.blocks = blocks;
         this.ready = true;
         this.meshDirty = true;
+
+        // Force updates
+        MinimapCamera3D.get().forceUpdate();
+        MinimapRenderer3D.markDirty();
     }
 
     public synchronized boolean isReady() {
@@ -45,5 +51,6 @@ public final class MinimapData3D {
         ready = false;
         meshDirty = true;
         blocks = new BlockScanner3D.Block3DData[0][0][0];
+        MinimapRenderer3D.markDirty();
     }
 }
