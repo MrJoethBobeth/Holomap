@@ -1,7 +1,7 @@
 package com.holomap.input;
 
-import com.holomap.map.MinimapRenderer;
-import com.holomap.scan.BlockScanner;
+import com.holomap.render.MinimapRenderer3D;
+import com.holomap.scan.BlockScanner3D;
 import net.fabricmc.fabric.api.client.event.lifecycle.v1.ClientTickEvents;
 import net.fabricmc.fabric.api.client.keybinding.v1.KeyBindingHelper;
 import net.minecraft.client.MinecraftClient;
@@ -35,12 +35,12 @@ public final class HoloMapKeybinds {
         ClientTickEvents.END_CLIENT_TICK.register(
                 client -> {
                     while (toggleMinimap.wasPressed()) {
-                        MinimapRenderer.toggleEnabled();
+                        MinimapRenderer3D.toggleEnabled();
                     }
                     while (rescanMinimap.wasPressed()) {
                         var player = MinecraftClient.getInstance().player;
                         if (player != null) {
-                            BlockScanner.scanAroundPlayerAsync(player, 48, 64);
+                            BlockScanner3D.scanAroundPlayerAsync(player, 48, 64);
                         }
                     }
                 });
