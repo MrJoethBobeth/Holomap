@@ -2,12 +2,14 @@ package com.holomap.scan;
 
 import com.holomap.HoloMapMod;
 import com.holomap.map.MinimapData3D;
+import com.holomap.render.BlockColorProvider;
 import java.util.concurrent.CompletableFuture;
 import net.minecraft.block.BlockState;
 import net.minecraft.client.MinecraftClient;
 import net.minecraft.util.math.BlockPos;
 import net.minecraft.util.math.MathHelper;
 import net.minecraft.world.World;
+import net.minecraft.world.Heightmap;
 
 public final class BlockScanner3D {
     private BlockScanner3D() {}
@@ -18,7 +20,7 @@ public final class BlockScanner3D {
 
         final var world = player.getWorld();
         final var origin = player.getBlockPos();
-        final int hr = MathHelper.clamp(horizontalRadius, 8, 32); // Smaller for performance
+        final int hr = MathHelper.clamp(horizontalRadius, 8, 32);
         final int vr = MathHelper.clamp(verticalRange, 8, 32);
 
         CompletableFuture.runAsync(() -> {
@@ -36,11 +38,15 @@ public final class BlockScanner3D {
         public final BlockState state;
         public final BlockPos pos;
         public final boolean[] visibleFaces; // [down, up, north, south, west, east]
+        public final BlockColorProvider.BlockInfo blockInfo;
+        public final int surfaceDistance; // Distance from surface level
 
-        public Block3DData(BlockState state, BlockPos pos, boolean[] visibleFaces) {
+        public Block3DData(BlockState state, BlockPos pos, boolean[] visibleFaces, BlockColorProvider.BlockInfo blockInfo, int surfaceDistance) {
             this.state = state;
             this.pos = pos;
             this.visibleFaces = visibleFaces;
+            this.blockInfo = blockInfo;
+            this.surfaceDistance = surfaceDistance;
         }
     }
 
@@ -50,50 +56,72 @@ public final class BlockScanner3D {
         Block3DData[][][] blocks = new Block3DData[size][height][size];
 
         // Start from surface and go down
-        int yStart = origin.getY() + 5; // Start above player
+        int yStart = origin.getY() + 5;
         int yEnd = Math.max(world.getBottomY(), origin.getY() - vr + 5);
 
         for (int dx = -hr; dx <= hr; dx++) {
             for (int dz = -hr; dz <= hr; dz++) {
-                // Find surface level first
-                int surfaceY = findSurfaceLevel(world, origin.getX() + dx, origin.getZ() + dz, yStart, yEnd);
-
-                // Scan from surface down to limited depth
-                int scanDepth = Math.min(vr, 16); // Limit depth for performance
-                for (int dy = 0; dy < scanDepth; dy++) {
-                    int y = surfaceY - dy;
-                    if (y < yEnd) break;
-
-                    BlockPos pos = new BlockPos(origin.getX() + dx, y, origin.getZ() + dz);
-                    BlockState state = world.getBlockState(pos);
-
-                    // Skip air blocks
-                    if (state.isAir()) {
-                        // But if we're at surface level and it's air, still record it
-                        if (dy > 3) continue; // Only skip air after going down a bit
-                    }
-
-                    boolean[] visibleFaces = calculateVisibleFaces(world, pos);
-                    blocks[dx + hr][dy][dz + hr] = new Block3DData(state, pos, visibleFaces);
-                }
+                // Get surface level for proper underground filtering
+                int surfaceY = world.getTopY(Heightmap.Type.WORLD_SURFACE, origin.getX() + dx, origin.getZ() + dz);
+                scanColumn(world, origin.getX() + dx, origin.getZ() + dz, yStart, yEnd, blocks, dx + hr, dz + hr, vr, surfaceY);
             }
         }
 
         return blocks;
     }
 
-    private static int findSurfaceLevel(World world, int x, int z, int startY, int endY) {
-        // Find the first solid block from top down
-        for (int y = startY; y >= endY; y--) {
-            BlockState state = world.getBlockState(new BlockPos(x, y, z));
-            if (!state.isAir() && state.getFluidState().isEmpty()) {
-                return y;
+    private static void scanColumn(World world, int x, int z, int yStart, int yEnd, Block3DData[][][] blocks, int arrayX, int arrayZ, int maxHeight, int surfaceY) {
+        for (int y = yStart; y >= yEnd && (yStart - y) < maxHeight; y--) {
+            BlockPos pos = new BlockPos(x, y, z);
+            BlockState state = world.getBlockState(pos);
+            BlockColorProvider.BlockInfo blockInfo = BlockColorProvider.getBlockInfo(state);
+
+            int surfaceDistance = Math.abs(y - surfaceY);
+
+            // Only skip air if it's not important structurally - now with surface awareness
+            if (state.isAir() && !shouldIncludeAir(world, pos, surfaceY)) {
+                continue;
+            }
+
+            int arrayY = yStart - y;
+            if (arrayY >= 0 && arrayY < maxHeight) {
+                boolean[] visibleFaces = calculateSmartVisibility(world, pos, state, blockInfo);
+                blocks[arrayX][arrayY][arrayZ] = new Block3DData(state, pos, visibleFaces, blockInfo, surfaceDistance);
             }
         }
-        return endY; // Fallback to bottom if no surface found
     }
 
-    private static boolean[] calculateVisibleFaces(World world, BlockPos pos) {
+    private static boolean shouldIncludeAir(World world, BlockPos pos, int surfaceY) {
+        // Strict surface-only air inclusion to prevent cave rendering
+
+        // Don't include air blocks that are significantly underground
+        int depthBelowSurface = surfaceY - pos.getY();
+        if (depthBelowSurface > 8) {
+            return false; // Too deep underground, likely a cave
+        }
+
+        // For blocks near or above surface, check if they have sky access
+        if (depthBelowSurface <= 0) {
+            // Above or at surface level - include if it has sky visibility
+            return world.isSkyVisible(pos);
+        }
+
+        // For shallow underground air (1-8 blocks below surface)
+        // Only include if it's part of surface features like overhangs or shallow caves
+        if (depthBelowSurface <= 3) {
+            // Check if this air block is connected to the surface
+            for (int dy = 1; dy <= depthBelowSurface + 2; dy++) {
+                BlockPos checkPos = pos.up(dy);
+                if (world.isSkyVisible(checkPos)) {
+                    return true; // Connected to surface
+                }
+            }
+        }
+
+        return false; // Underground air block, likely a cave
+    }
+
+    private static boolean[] calculateSmartVisibility(World world, BlockPos pos, BlockState currentState, BlockColorProvider.BlockInfo currentInfo) {
         boolean[] faces = new boolean[6]; // down, up, north, south, west, east
 
         BlockPos[] neighbors = {
@@ -101,11 +129,61 @@ public final class BlockScanner3D {
         };
 
         for (int i = 0; i < 6; i++) {
-            BlockState neighbor = world.getBlockState(neighbors[i]);
-            // Face is visible if neighbor is air or transparent
-            faces[i] = neighbor.isAir() || !neighbor.isOpaque();
+            BlockState neighborState = world.getBlockState(neighbors[i]);
+            BlockColorProvider.BlockInfo neighborInfo = BlockColorProvider.getBlockInfo(neighborState);
+
+            faces[i] = shouldShowFace(currentState, currentInfo, neighborState, neighborInfo, i);
         }
 
         return faces;
+    }
+
+    private static boolean shouldShowFace(BlockState current, BlockColorProvider.BlockInfo currentInfo,
+                                          BlockState neighbor, BlockColorProvider.BlockInfo neighborInfo, int faceIndex) {
+
+        // Always show faces adjacent to air
+        if (neighbor.isAir()) {
+            return true;
+        }
+
+        // Always show top faces for better 3D appearance
+        if (faceIndex == 1) { // Up face
+            return true;
+        }
+
+        // Show faces between different block types with different priorities
+        if (currentInfo.type != neighborInfo.type) {
+            return true;
+        }
+
+        // Show faces where there's a priority difference (e.g., leaves over grass)
+        if (Math.abs(currentInfo.priority - neighborInfo.priority) > 10) {
+            return true;
+        }
+
+        // Show faces for transparent blocks
+        if (currentInfo.isTransparent && !neighborInfo.isTransparent) {
+            return true;
+        }
+
+        // Show faces for fluids
+        if (currentInfo.isFluid && !neighborInfo.isFluid) {
+            return true;
+        }
+
+        // Show faces between blocks of significantly different colors
+        int colorDiff = calculateColorDifference(currentInfo.color, neighborInfo.color);
+        if (colorDiff > 50) { // Threshold for color difference
+            return true;
+        }
+
+        return false;
+    }
+
+    private static int calculateColorDifference(int color1, int color2) {
+        int r1 = (color1 >>> 16) & 0xFF, g1 = (color1 >>> 8) & 0xFF, b1 = color1 & 0xFF;
+        int r2 = (color2 >>> 16) & 0xFF, g2 = (color2 >>> 8) & 0xFF, b2 = color2 & 0xFF;
+
+        return Math.abs(r1 - r2) + Math.abs(g1 - g2) + Math.abs(b1 - b2);
     }
 }

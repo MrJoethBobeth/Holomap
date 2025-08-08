@@ -70,7 +70,6 @@ public final class MinimapRenderer3D {
 
         // Render the cached texture
         if (cachedTexture != null && textureId != null) {
-            // Crop to viewport bounds
             int cropX = Math.max(0, viewX);
             int cropY = Math.max(0, viewY);
             int cropW = Math.min(viewSize, screenW - cropX);
@@ -83,12 +82,10 @@ public final class MinimapRenderer3D {
     }
 
     private static void updateTexture(int size) {
-        // Clean up old texture
         if (cachedTexture != null) {
             cachedTexture.close();
         }
 
-        // Create new texture
         NativeImage image = new NativeImage(size, size, false);
 
         // Clear to transparent
@@ -98,10 +95,8 @@ public final class MinimapRenderer3D {
             }
         }
 
-        // Render to image
         renderToImage(image, size);
 
-        // Upload to GPU
         cachedTexture = new NativeImageBackedTexture(image);
         if (textureId != null) {
             MinecraftClient.getInstance().getTextureManager().destroyTexture(textureId);
@@ -115,8 +110,12 @@ public final class MinimapRenderer3D {
 
         List<RenderedFace> faces = buildFaceList(size);
 
-        // Sort by depth (back to front)
-        faces.sort(Comparator.comparingDouble((RenderedFace f) -> f.avgDepth).reversed());
+        // Sort by priority first, then depth
+        faces.sort((f1, f2) -> {
+            int priorityCompare = Integer.compare(f1.priority, f2.priority);
+            if (priorityCompare != 0) return priorityCompare;
+            return Double.compare(f2.avgDepth, f1.avgDepth); // Higher depth first
+        });
 
         // Render each face to the image
         for (RenderedFace face : faces) {
@@ -139,9 +138,9 @@ public final class MinimapRenderer3D {
             for (int y = 0; y < blocks[x].length; y++) {
                 for (int z = 0; z < blocks[x][y].length; z++) {
                     var blockData = blocks[x][y][z];
-                    if (blockData == null || blockData.state.isAir()) continue;
+                    if (blockData == null) continue;
 
-                    // World position (centered on origin)
+                    // Use consistent world coordinates relative to center - like original but centered
                     float worldX = x - hr;
                     float worldY = y - vr/2f;
                     float worldZ = z - hr;
@@ -157,8 +156,18 @@ public final class MinimapRenderer3D {
     private static void addBlockFaces(List<RenderedFace> faces, BlockScanner3D.Block3DData blockData,
                                       float x, float y, float z, MinimapCamera3D camera, int viewSize) {
         boolean[] visibleFaces = blockData.visibleFaces;
+        BlockColorProvider.BlockInfo blockInfo = blockData.blockInfo;
 
-        // Define face vertices for a unit cube
+        // Skip air blocks unless they're structurally important
+        if (blockInfo.type == BlockColorProvider.BlockType.AIR) {
+            return;
+        }
+
+        // Filter out deep underground blocks to maintain clean surface representation
+        if (blockData.surfaceDistance > 12 && blockInfo.priority < 70) {
+            return;
+        }
+
         float[][][] faceVertices = {
                 // Down face (Y-)
                 {{x, y, z+1}, {x+1, y, z+1}, {x+1, y, z}, {x, y, z}},
@@ -174,22 +183,15 @@ public final class MinimapRenderer3D {
                 {{x+1, y, z+1}, {x+1, y, z}, {x+1, y+1, z}, {x+1, y+1, z+1}}
         };
 
-        // Get block color based on block type
-        int blockColor = getBlockColor(blockData.state.getBlock().getName().getString());
+        // Use block color from BlockColorProvider
+        int baseColor = blockInfo.color;
 
-        int[] faceColors = {
-                adjustBrightness(blockColor, 0.5f), // Down - darker
-                adjustBrightness(blockColor, 1.0f), // Up - full brightness
-                adjustBrightness(blockColor, 0.8f), // North - medium
-                adjustBrightness(blockColor, 0.8f), // South - medium
-                adjustBrightness(blockColor, 0.6f), // West - darker
-                adjustBrightness(blockColor, 0.6f)  // East - darker
-        };
+        // Different lighting for each face
+        float[] lightLevels = {0.5f, 1.0f, 0.8f, 0.8f, 0.6f, 0.6f}; // down, up, north, south, west, east
 
         for (int i = 0; i < 6; i++) {
             if (!visibleFaces[i]) continue;
 
-            // Project face vertices to screen
             Vector3f[] screenPoints = new Vector3f[4];
             float totalDepth = 0;
             boolean allInFront = true;
@@ -199,7 +201,6 @@ public final class MinimapRenderer3D {
                 screenPoints[j] = camera.projectToScreen(vertex[0], vertex[1], vertex[2], viewSize);
                 totalDepth += screenPoints[j].z;
 
-                // Check if behind camera
                 if (screenPoints[j].z > 1.0f) {
                     allInFront = false;
                     break;
@@ -208,7 +209,6 @@ public final class MinimapRenderer3D {
 
             if (!allInFront) continue;
 
-            // Convert to integer arrays for polygon drawing
             int[] xPoints = new int[4];
             int[] yPoints = new int[4];
 
@@ -218,24 +218,23 @@ public final class MinimapRenderer3D {
             }
 
             float avgDepth = totalDepth / 4.0f;
-            faces.add(new RenderedFace(xPoints, yPoints, avgDepth, faceColors[i]));
+            int faceColor = BlockColorProvider.adjustBrightness(baseColor, lightLevels[i]);
+
+            faces.add(new RenderedFace(xPoints, yPoints, avgDepth, faceColor, blockInfo.priority));
         }
     }
 
     private static void drawPolygonToImage(NativeImage image, int[] xPoints, int[] yPoints, int color, int size) {
         if (xPoints.length != 4) return;
 
-        // Find bounding box
         int minX = Math.max(0, Math.min(Math.min(Math.min(xPoints[0], xPoints[1]), xPoints[2]), xPoints[3]));
         int maxX = Math.min(size - 1, Math.max(Math.max(Math.max(xPoints[0], xPoints[1]), xPoints[2]), xPoints[3]));
         int minY = Math.max(0, Math.min(Math.min(Math.min(yPoints[0], yPoints[1]), yPoints[2]), yPoints[3]));
         int maxY = Math.min(size - 1, Math.max(Math.max(Math.max(yPoints[0], yPoints[1]), yPoints[2]), yPoints[3]));
 
-        // Scanline fill
         for (int y = minY; y <= maxY; y++) {
             List<Integer> intersections = new ArrayList<>();
 
-            // Find intersections with polygon edges
             for (int i = 0; i < 4; i++) {
                 int j = (i + 1) % 4;
                 int y1 = yPoints[i], y2 = yPoints[j];
@@ -253,44 +252,27 @@ public final class MinimapRenderer3D {
 
             intersections.sort(Integer::compareTo);
 
-            // Fill between pairs of intersections
             for (int i = 0; i < intersections.size() - 1; i += 2) {
                 int startX = Math.max(0, intersections.get(i));
                 int endX = Math.min(size - 1, intersections.get(i + 1));
 
                 for (int x = startX; x <= endX; x++) {
-                    image.setColor(x, y, color);
+                    // Only overwrite if current pixel is transparent or lower priority
+                    int existingColor = image.getColor(x, y);
+                    if ((existingColor & 0xFF000000) == 0 || shouldOverwrite(existingColor, color)) {
+                        image.setColor(x, y, color);
+                    }
                 }
             }
         }
     }
 
-    private static int getBlockColor(String blockName) {
-        // Simple color mapping based on block names - you can expand this
-        return switch (blockName.toLowerCase()) {
-            case String s when s.contains("grass") -> 0xFF4CAF50;
-            case String s when s.contains("dirt") -> 0xFF8D6E63;
-            case String s when s.contains("stone") -> 0xFF757575;
-            case String s when s.contains("wood") -> 0xFF795548;
-            case String s when s.contains("log") -> 0xFF5D4037;
-            case String s when s.contains("sand") -> 0xFFFDD835;
-            case String s when s.contains("water") -> 0xFF2196F3;
-            case String s when s.contains("lava") -> 0xFFFF5722;
-            case String s when s.contains("leaves") -> 0xFF2E7D32;
-            case String s when s.contains("ore") -> 0xFF37474F;
-            case String s when s.contains("snow") -> 0xFFFAFAFA;
-            case String s when s.contains("ice") -> 0xFFB3E5FC;
-            default -> 0xFF9E9E9E; // Default gray
-        };
-    }
+    private static boolean shouldOverwrite(int existingColor, int newColor) {
+        // Simple overwrite logic - can be enhanced
+        int existingAlpha = (existingColor >>> 24) & 0xFF;
+        int newAlpha = (newColor >>> 24) & 0xFF;
 
-    private static int adjustBrightness(int color, float factor) {
-        int r = (int) (((color >> 16) & 0xFF) * factor);
-        int g = (int) (((color >> 8) & 0xFF) * factor);
-        int b = (int) ((color & 0xFF) * factor);
-        int a = (color >> 24) & 0xFF;
-
-        return (a << 24) | (Math.min(255, r) << 16) | (Math.min(255, g) << 8) | Math.min(255, b);
+        return newAlpha >= existingAlpha;
     }
 
     public static class RenderedFace {
@@ -298,12 +280,14 @@ public final class MinimapRenderer3D {
         public final int[] yPoints;
         public final float avgDepth;
         public final int color;
+        public final int priority;
 
-        public RenderedFace(int[] xPoints, int[] yPoints, float avgDepth, int color) {
+        public RenderedFace(int[] xPoints, int[] yPoints, float avgDepth, int color, int priority) {
             this.xPoints = xPoints;
             this.yPoints = yPoints;
             this.avgDepth = avgDepth;
             this.color = color;
+            this.priority = priority;
         }
     }
 
